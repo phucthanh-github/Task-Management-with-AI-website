@@ -10,12 +10,14 @@ from typing import List, Optional
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from pymongo.errors import DuplicateKeyError
 
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
 from .config import settings
 from .database import connect_to_mongo, close_mongo_connection, get_db
+from .utils import utc_now
 from .models import (
     UserRegister, UserLogin, UserResponse, Token, TodoCreate, TodoUpdate, TodoResponse,
     ChatMessagePayload, ChatMessageModel, ChatHistoryResponse, serialize_doc, serialize_list
@@ -23,6 +25,7 @@ from .models import (
 from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 from .scheduler import start_scheduler, shutdown_scheduler
 from .agent.graph import agent_graph
+from .routers.todos import router as todos_router
 
 # Logging Configuration with Credential Redaction
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -32,6 +35,8 @@ limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(title="To Do List AI Assistant", version="1.0.0")
 app.state.limiter = limiter
+
+app.include_router(todos_router)
 
 @app.exception_handler(RateLimitExceeded)
 async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -101,10 +106,16 @@ async def register_user(request: Request, user_in: UserRegister, db = Depends(ge
     new_user = {
         "email": user_in.email,
         "hashed_password": hashed_password,
-        "created_at": datetime.utcnow()
+        "created_at": utc_now()
     }
     
-    result = await db.users.insert_one(new_user)
+    try:
+        result = await db.users.insert_one(new_user)
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Tài khoản Gmail này đã được đăng ký trước đó."
+        )
     created_user = await db.users.find_one({"_id": result.inserted_id})
     return serialize_doc(created_user)
 
@@ -225,11 +236,14 @@ async def google_login(request: Request, payload: GoogleTokenPayload, db = Depen
         new_user = {
             "email": email,
             "hashed_password": get_password_hash("google_signed_in_oauth_account"),
-            "created_at": datetime.utcnow()
+            "created_at": utc_now()
         }
-        await db.users.insert_one(new_user)
+        try:
+            await db.users.insert_one(new_user)
+            logger.info(f"[Google Auth] Registered new user from Google Sign-In: {email}")
+        except DuplicateKeyError:
+            logger.info(f"[Google Auth] Concurrent registration caught DuplicateKeyError for email: {email}")
         user = await db.users.find_one({"email": email})
-        logger.info(f"[Google Auth] Registered new user from Google Sign-In: {email}")
     else:
         logger.info(f"[Google Auth] Logged in existing user from Google Sign-In: {email}")
         
@@ -237,111 +251,6 @@ async def google_login(request: Request, payload: GoogleTokenPayload, db = Depen
     access_token = create_access_token(data={"sub": user["email"]})
     return {"access_token": access_token, "token_type": "bearer"}
 
-
-
-# ==========================================
-# TODO ENDPOINTS (CRUD)
-# ==========================================
-
-@app.get("/api/todos", response_model=List[TodoResponse])
-async def get_todos(current_user = Depends(get_current_user), db = Depends(get_db)):
-    if db is None:
-        raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
-        
-    cursor = db.todos.find({"user_id": current_user["id"]}).sort("created_at", -1)
-    todos = await cursor.to_list(length=100)
-    
-    # Proactively check for overdue items to update status dynamically
-    now = datetime.utcnow()
-    updated_todos = []
-    for todo in todos:
-        # If pending or in_progress and deadline is passed, it is overdue
-        if todo["status"] in ["pending", "in_progress"] and todo.get("deadline") and todo["deadline"] < now:
-            await db.todos.update_one(
-                {"_id": todo["_id"]},
-                {"$set": {"status": "overdue", "updated_at": now}}
-            )
-            todo["status"] = "overdue"
-        updated_todos.append(serialize_doc(todo))
-        
-    return updated_todos
-
-@app.post("/api/todos", response_model=TodoResponse)
-async def create_todo(todo_in: TodoCreate, current_user = Depends(get_current_user), db = Depends(get_db)):
-    if db is None:
-        raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
-        
-    # Strip timezone info if deadline has it, MongoDB stores in UTC
-    deadline_utc = todo_in.deadline
-    if deadline_utc:
-        deadline_utc = deadline_utc.replace(tzinfo=None)
-        
-    new_todo = {
-        "user_id": current_user["id"],
-        "title": todo_in.title.strip(),
-        "description": todo_in.description.strip() if todo_in.description else "",
-        "status": "pending",
-        "deadline": deadline_utc,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
-        "reminded": False
-    }
-    
-    result = await db.todos.insert_one(new_todo)
-    created_todo = await db.todos.find_one({"_id": result.inserted_id})
-    return serialize_doc(created_todo)
-
-@app.put("/api/todos/{todo_id}", response_model=TodoResponse)
-async def update_todo(todo_id: str, todo_in: TodoUpdate, current_user = Depends(get_current_user), db = Depends(get_db)):
-    if db is None:
-        raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
-        
-    try:
-        obj_id = ObjectId(todo_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Mã công việc không hợp lệ")
-        
-    todo = await db.todos.find_one({"_id": obj_id, "user_id": current_user["id"]})
-    if not todo:
-        raise HTTPException(status_code=404, detail="Không tìm thấy công việc")
-        
-    update_data = {}
-    if todo_in.title is not None:
-        update_data["title"] = todo_in.title.strip()
-    if todo_in.description is not None:
-        update_data["description"] = todo_in.description.strip()
-    if todo_in.status is not None:
-        if todo_in.status not in ["pending", "in_progress", "completed", "overdue"]:
-            raise HTTPException(status_code=400, detail="Trạng thái không hợp lệ")
-        update_data["status"] = todo_in.status
-    if todo_in.deadline is not None:
-        # If set to None, we clear it, otherwise store UTC datetime
-        update_data["deadline"] = todo_in.deadline.replace(tzinfo=None) if todo_in.deadline else None
-        # Reset reminded flag to send warning email again if deadline was updated
-        update_data["reminded"] = False
-        
-    if update_data:
-        update_data["updated_at"] = datetime.utcnow()
-        await db.todos.update_one({"_id": obj_id}, {"$set": update_data})
-        
-    updated_todo = await db.todos.find_one({"_id": obj_id})
-    return serialize_doc(updated_todo)
-
-@app.delete("/api/todos/{todo_id}")
-async def delete_todo(todo_id: str, current_user = Depends(get_current_user), db = Depends(get_db)):
-    if db is None:
-        raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
-        
-    try:
-        obj_id = ObjectId(todo_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Mã công việc không hợp lệ")
-        
-    result = await db.todos.delete_one({"_id": obj_id, "user_id": current_user["id"]})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Không tìm thấy công việc cần xóa")
-        
-    return {"message": "Đã xóa công việc thành công"}
 
 # ==========================================
 # CHAT / AGENT ENDPOINTS
@@ -377,7 +286,7 @@ async def send_chat_message(request: Request, payload: ChatMessagePayload, curre
         "user_id": user_id,
         "sender": "user",
         "content": user_message,
-        "timestamp": datetime.utcnow()
+        "timestamp": utc_now()
     })
     
     # 2. Retrieve last 10 chat messages for Agent history context
@@ -424,7 +333,7 @@ async def send_chat_message(request: Request, payload: ChatMessagePayload, curre
         "user_id": user_id,
         "sender": "assistant",
         "content": ai_response,
-        "timestamp": datetime.utcnow()
+        "timestamp": utc_now()
     })
     
     return {

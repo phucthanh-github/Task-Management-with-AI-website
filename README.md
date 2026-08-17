@@ -180,3 +180,35 @@ A modern, full-stack task management application powered by intelligent AI assis
    - API Documentation: `http://localhost:8000/docs` (Swagger UI)
 
 ---
+
+## Security Configuration
+
+### Environment Variables
+
+Ensure you create `.env` files for both backend and frontend based on the `.env.example` templates provided. **Never commit `.env` files to source control.**
+
+#### Backend (`backend/.env`)
+
+- `APP_ENV`: Application environment (`development` | `test` | `production`). In `production`, the server fails fast if critical security settings are invalid.
+- `SECRET_KEY`: High-entropy secret key for JWT signing. Must be at least 32 characters long in production.
+- `ACCESS_TOKEN_EXPIRE_MINUTES`: Expiration time for JWT access tokens (default: `60` minutes).
+- `FRONTEND_URL`: Primary URL of the frontend application used for CORS origin allowlist.
+- `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed origins. Wildcards (`*` or regex wildcard origins) are disabled.
+- `GOOGLE_CLIENT_ID`: Google OAuth 2.0 Client ID for server-side ID token verification (aud, iss, exp, email_verified).
+- `DEV_DEMO_ENABLED`: Set to `false` in production. Controls local development fallback features.
+- `RATE_LIMIT_AUTH`: Rate limit for registration and login endpoints (e.g. `5/minute`).
+- `RATE_LIMIT_CHAT`: Rate limit for AI chat message endpoints (e.g. `20/minute`).
+
+#### Frontend (`frontend/.env`)
+
+- `VITE_API_URL`: Backend API URL (e.g., `http://localhost:8000`).
+- `VITE_GOOGLE_CLIENT_ID`: Google OAuth 2.0 Client ID for Google Sign-In button initialization.
+- `VITE_DEV_DEMO_ENABLED`: Set to `false` in production. When `true`, enables the *"Development demo login"* button strictly for local development testing.
+
+### Local Development Demo Login
+
+The *"Development demo login"* button is strictly hidden in production environments. To enable it locally for rapid offline testing:
+
+1. In `frontend/.env`, set `VITE_DEV_DEMO_ENABLED=true`.
+2. In `backend/.env`, set `DEV_DEMO_ENABLED=true`.
+3. Optionally set `VITE_DEV_DEMO_EMAIL` and `VITE_DEV_DEMO_PASSWORD` in your local `.env`.

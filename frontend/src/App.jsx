@@ -1,14 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   CheckCircle, 
-  Circle, 
+  Circle,
   Trash2, 
-  Edit3, 
+  Edit3,
   Plus, 
   Send, 
   LogOut, 
   Bot, 
-  Calendar, 
   User, 
   AlertCircle, 
   Clock, 
@@ -17,6 +16,7 @@ import {
   MessageSquare,
   Key
 } from 'lucide-react';
+
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -35,10 +35,9 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [chatLoading, setChatLoading] = useState(false);
   const [error, setError] = useState('');
-  const [successMsg, setSuccessMsg] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
-  
+
   // Hugging Face Token Settings States
   const [googleLoaded, setGoogleLoaded] = useState(false);
   const [showHFConfig, setShowHFConfig] = useState(false);
@@ -60,25 +59,15 @@ function App() {
   // Chat scroll anchor
   const chatEndRef = useRef(null);
 
-  // Auto-scroll chat history
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages, chatLoading]);
+  const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || 'your_google_client_id_here';
 
-  // Load User Details, Todos and Chat History upon authentication
-  useEffect(() => {
-    if (token) {
-      localStorage.setItem('token', token);
-      fetchUserData();
-      fetchTodos();
-      fetchChatHistory();
-    } else {
-      localStorage.removeItem('token');
-      setUser(null);
-      setTodos([]);
-      setChatMessages([]);
-    }
-  }, [token]);
+  const handleLogout = () => {
+    setToken('');
+    localStorage.removeItem('token');
+    setUser(null);
+    setTodos([]);
+    setChatMessages([]);
+  };
 
   // API Call: Fetch User Info
   const fetchUserData = async () => {
@@ -90,7 +79,6 @@ function App() {
         const data = await res.json();
         setUser(data);
       } else {
-        // Token expired or invalid
         handleLogout();
       }
     } catch (err) {
@@ -131,7 +119,46 @@ function App() {
     }
   };
 
-  const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || 'your_google_client_id_here';
+  // Auto-scroll chat history
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages, chatLoading]);
+
+  // Load User Details, Todos and Chat History upon authentication
+  useEffect(() => {
+    if (!token) {
+      localStorage.removeItem('token');
+      return;
+    }
+    localStorage.setItem('token', token);
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const [userRes, todosRes, chatRes] = await Promise.all([
+          fetch(`${API_URL}/api/auth/me`, { headers: { 'Authorization': `Bearer ${token}` } }),
+          fetch(`${API_URL}/api/todos`, { headers: { 'Authorization': `Bearer ${token}` } }),
+          fetch(`${API_URL}/api/chat/history`, { headers: { 'Authorization': `Bearer ${token}` } })
+        ]);
+        if (isMounted && userRes.ok) {
+          const u = await userRes.json();
+          setUser(u);
+        }
+        if (isMounted && todosRes.ok) {
+          const t = await todosRes.json();
+          setTodos(t);
+        }
+        if (isMounted && chatRes.ok) {
+          const c = await chatRes.json();
+          setChatMessages(c.messages || []);
+        }
+      } catch (err) {
+        console.error("Error fetching initial data:", err);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, [token]);
+
 
   // Initialize and render Google Login button
   const handleGoogleCredentialResponse = async (response) => {
@@ -158,8 +185,8 @@ function App() {
   // Polling to wait for Google Sign-In script loading
   useEffect(() => {
     if (window.google) {
-      setGoogleLoaded(true);
-      return;
+      const timer = setTimeout(() => setGoogleLoaded(true), 0);
+      return () => clearTimeout(timer);
     }
     const interval = setInterval(() => {
       if (window.google) {
@@ -194,7 +221,8 @@ function App() {
         console.error("Error initializing Google accounts SDK:", err);
       }
     }
-  }, [token, googleLoaded]);
+  }, [token, googleLoaded, GOOGLE_CLIENT_ID]);
+
 
   // Actions: Save user's HF Token
   const handleSaveHFToken = async (e) => {
@@ -259,10 +287,6 @@ function App() {
     }
   };
 
-  const handleLogout = () => {
-    setToken('');
-    localStorage.removeItem('token');
-  };
 
   const handleEmailAuthSubmit = async (e) => {
     e.preventDefault();
@@ -312,10 +336,16 @@ function App() {
     }
   };
 
+  const IS_DEV_DEMO_ENABLED = import.meta.env.VITE_DEV_DEMO_ENABLED === 'true';
+
   const handleLocalBypassLogin = async () => {
+    if (!IS_DEV_DEMO_ENABLED) {
+      setError('Tính năng demo login bị tắt trong môi trường này.');
+      return;
+    }
     setError('');
-    const email = 'testuser@gmail.com';
-    const password = 'testpassword123';
+    const email = import.meta.env.VITE_DEV_DEMO_EMAIL || 'testuser@gmail.com';
+    const password = import.meta.env.VITE_DEV_DEMO_PASSWORD || 'testpassword123';
     try {
       // 1. Try to login
       let res = await fetch(`${API_URL}/api/auth/login`, {
@@ -356,6 +386,7 @@ function App() {
       setError(err.message);
     }
   };
+
 
   // Actions: Create Todo
   const handleCreateTodo = async (e) => {
@@ -551,7 +582,9 @@ function App() {
       });
       if (res.ok) {
         setChatMessages([]);
+        fetchChatHistory();
       }
+
     } catch (err) {
       console.error("Error clearing chat history:", err);
     }
@@ -657,15 +690,18 @@ function App() {
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
             <div id="google-btn-parent" style={{ width: '100%', minHeight: '40px', display: 'flex', justifyContent: 'center' }}></div>
             
-            <button 
-              type="button"
-              className="add-task-btn" 
-              style={{ width: '100%', justifyContent: 'center', padding: '12px', background: 'linear-gradient(135deg, #4f46e5, #6366f1)', color: 'white', border: 'none' }}
-              onClick={handleLocalBypassLogin}
-            >
-              Chạy Thử Nghiệm Nhanh (Bypass Google Auth)
-            </button>
+            {IS_DEV_DEMO_ENABLED && (
+              <button 
+                type="button"
+                className="add-task-btn" 
+                style={{ width: '100%', justifyContent: 'center', padding: '12px', background: 'linear-gradient(135deg, #4f46e5, #6366f1)', color: 'white', border: 'none' }}
+                onClick={handleLocalBypassLogin}
+              >
+                Development demo login
+              </button>
+            )}
           </div>
+
         </div>
       </div>
     );

@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime
+from .utils import utc_now
 
 # Helper to serialize MongoDB object IDs
 def serialize_doc(doc) -> dict:
@@ -115,7 +116,7 @@ class ChatMessagePayload(BaseModel):
 class ChatMessageModel(BaseModel):
     sender: str  # "user" or "assistant"
     content: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utc_now)
 
 class ChatHistoryResponse(BaseModel):
     messages: List[ChatMessageModel]

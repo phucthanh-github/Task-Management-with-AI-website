@@ -4,6 +4,7 @@ from bson import ObjectId
 from llama_index.core.tools import FunctionTool
 
 from ..database import get_db
+from ..utils import utc_now, make_utc
 
 def parse_deadline_str(deadline: Optional[str]) -> Optional[datetime]:
     if not deadline:
@@ -17,14 +18,17 @@ def parse_deadline_str(deadline: Optional[str]) -> Optional[datetime]:
         try:
             val = str(deadline).strip().replace("Z", "+00:00")
             if "t" in val.lower():
-                return datetime.fromisoformat(val).replace(tzinfo=None)
-            return datetime.strptime(str(deadline).strip(), fmt)
+                dt = datetime.fromisoformat(val)
+                return make_utc(dt)
+            dt = datetime.strptime(str(deadline).strip(), fmt)
+            return make_utc(dt)
         except Exception:
             continue
             
     # Try parsing direct fromisoformat
     try:
-        return datetime.fromisoformat(str(deadline).strip().replace("Z", "+00:00")).replace(tzinfo=None)
+        dt = datetime.fromisoformat(str(deadline).strip().replace("Z", "+00:00"))
+        return make_utc(dt)
     except Exception:
         raise ValueError("Không thể phân tích định dạng deadline. Vui lòng gửi định dạng ISO (YYYY-MM-DDTHH:MM:SS).")
 
@@ -73,14 +77,15 @@ async def execute_action_tool(
             except ValueError as e:
                 return f"Lỗi: {str(e)}"
             
+            now = utc_now()
             new_todo = {
                 "user_id": user_id,
                 "title": title.strip(),
                 "description": (description or "").strip(),
                 "status": "pending",
                 "deadline": parsed_deadline,
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow(),
+                "created_at": now,
+                "updated_at": now,
                 "reminded": False
             }
             result = await db.todos.insert_one(new_todo)
@@ -119,7 +124,7 @@ async def execute_action_tool(
             if not update_data:
                 return "⚠️ Không có thông tin thay đổi nào được gửi lên để cập nhật."
                 
-            update_data["updated_at"] = datetime.utcnow()
+            update_data["updated_at"] = utc_now()
             # Reset flag reminded khi cập nhật deadline mới
             if "deadline" in update_data:
                 update_data["reminded"] = False

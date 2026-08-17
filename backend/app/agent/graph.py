@@ -9,6 +9,7 @@ from huggingface_hub import AsyncInferenceClient
 from ..config import settings
 from .tools import execute_info_tool, execute_action_tool
 from .prompts import get_system_prompt
+from ..utils import utc_now
 
 # Define the State format for LangGraph
 class AgentState(TypedDict):
@@ -106,12 +107,13 @@ def rule_based_fallback(query: str, todos: List[Dict[str, Any]]) -> Dict[str, An
         
         # Simple deadline parsing
         deadline_iso = None
+        now = utc_now()
         if "ngày mai" in query_lower:
-            tomorrow = datetime.utcnow() + timedelta(days=1)
+            tomorrow = now + timedelta(days=1)
             tomorrow = tomorrow.replace(hour=17, minute=0, second=0)
             deadline_iso = tomorrow.isoformat()
         elif "hôm nay" in query_lower:
-            today = datetime.utcnow().replace(hour=23, minute=59, second=0)
+            today = now.replace(hour=23, minute=59, second=0)
             deadline_iso = today.isoformat()
             
         return {
@@ -234,7 +236,7 @@ async def llm_node(state: AgentState) -> Dict[str, Any]:
         chat_history_str += f"{role}: {msg['content']}\n"
 
     # Current Time for deadline reference
-    current_time_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    current_time_str = utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # 4. Construct System Prompt using template helper
     system_prompt = get_system_prompt(
