@@ -18,7 +18,7 @@ def serialize_list(docs) -> list:
 # Auth Schemas
 class UserRegister(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(..., min_length=8, max_length=128, description="Mật khẩu từ 8 đến 128 ký tự")
 
     @field_validator("email")
     @classmethod
@@ -28,9 +28,23 @@ class UserRegister(BaseModel):
             raise ValueError("Chỉ chấp nhận đăng ký tài khoản bằng định dạng Gmail (@gmail.com)")
         return v
 
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Mật khẩu không được chứa toàn khoảng trắng")
+        return v
+
 class UserLogin(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(..., min_length=1, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Mật khẩu không được chứa toàn khoảng trắng")
+        return v
 
 class UserResponse(BaseModel):
     id: str
@@ -47,15 +61,33 @@ class TokenData(BaseModel):
 
 # Todo Schemas
 class TodoCreate(BaseModel):
-    title: str = Field(..., min_length=1, description="Tiêu đề công việc")
-    description: Optional[str] = ""
+    title: str = Field(..., min_length=1, max_length=200, description="Tiêu đề công việc")
+    description: Optional[str] = Field(default="", max_length=2000, description="Mô tả chi tiết công việc")
     deadline: Optional[datetime] = None
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError("Tiêu đề công việc không được chỉ chứa khoảng trắng")
+        return s
+
 class TodoUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)
     status: Optional[str] = None  # pending, in_progress, completed
     deadline: Optional[datetime] = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            s = v.strip()
+            if not s:
+                raise ValueError("Tiêu đề công việc không được chỉ chứa khoảng trắng")
+            return s
+        return v
 
 class TodoResponse(BaseModel):
     id: str
@@ -69,6 +101,17 @@ class TodoResponse(BaseModel):
     reminded: bool
 
 # Chat Schemas
+class ChatMessagePayload(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000, description="Nội dung tin nhắn chat")
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, v: str) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError("Nội dung chat không được chứa toàn khoảng trắng")
+        return s
+
 class ChatMessageModel(BaseModel):
     sender: str  # "user" or "assistant"
     content: str
@@ -76,3 +119,4 @@ class ChatMessageModel(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     messages: List[ChatMessageModel]
+

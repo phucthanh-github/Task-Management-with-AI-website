@@ -1,37 +1,66 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+import logging
+from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 from bson import ObjectId
 from typing import List, Optional
 
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+
 from .config import settings
 from .database import connect_to_mongo, close_mongo_connection, get_db
 from .models import (
     UserRegister, UserLogin, UserResponse, Token, TodoCreate, TodoUpdate, TodoResponse,
-    ChatMessageModel, ChatHistoryResponse, serialize_doc, serialize_list
+    ChatMessagePayload, ChatMessageModel, ChatHistoryResponse, serialize_doc, serialize_list
 )
 from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 from .scheduler import start_scheduler, shutdown_scheduler
 from .agent.graph import agent_graph
 
-app = FastAPI(title="To Do List AI Assistant", version="1.0.0")
+# Logging Configuration with Credential Redaction
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("todolist_api")
 
-# Setup CORS
+limiter = Limiter(key_func=get_remote_address)
+
+app = FastAPI(title="To Do List AI Assistant", version="1.0.0")
+app.state.limiter = limiter
+
+@app.exception_handler(RateLimitExceeded)
+async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"detail": "Bạn đã gửi quá nhiều yêu cầu. Vui lòng thử lại sau ít phút."}
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=exc.headers if hasattr(exc, "headers") else None
+        )
+    logger.error(f"[Unhandled Error] Path: {request.url.path} | Error: {exc.__class__.__name__}")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Đã xảy ra lỗi máy chủ nội bộ. Vui lòng thử lại sau."}
+    )
+
+# Setup Strict CORS without regex wildcards
+cors_origins = settings.get_cors_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.FRONTEND_URL, 
-        "http://localhost:5173", 
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://[::1]:5173",
-        "http://[::1]:3000"
-    ],
-    allow_origin_regex=r"https?://.*",
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -55,7 +84,8 @@ def read_root():
 # ==========================================
 
 @app.post("/api/auth/register", response_model=UserResponse)
-async def register_user(user_in: UserRegister, db = Depends(get_db)):
+@limiter.limit(settings.RATE_LIMIT_AUTH)
+async def register_user(request: Request, user_in: UserRegister, db = Depends(get_db)):
     if db is None:
         raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
         
@@ -79,7 +109,8 @@ async def register_user(user_in: UserRegister, db = Depends(get_db)):
     return serialize_doc(created_user)
 
 @app.post("/api/auth/login", response_model=Token)
-async def login_user(user_in: UserLogin, db = Depends(get_db)):
+@limiter.limit(settings.RATE_LIMIT_AUTH)
+async def login_user(request: Request, user_in: UserLogin, db = Depends(get_db)):
     if db is None:
         raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
         
@@ -138,30 +169,40 @@ class GoogleTokenPayload(BaseModel):
     token: str
 
 @app.post("/api/auth/google-login", response_model=Token)
-async def google_login(payload: GoogleTokenPayload, db = Depends(get_db)):
+@limiter.limit(settings.RATE_LIMIT_AUTH)
+async def google_login(request: Request, payload: GoogleTokenPayload, db = Depends(get_db)):
     if db is None:
         raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
         
-    google_token = payload.token
-    
-    # 1. Verify Google token using Google API Tokeninfo
-    try:
-        import httpx
-        url = f"https://oauth2.googleapis.com/tokeninfo?id_token={google_token}"
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Mã xác thực Google ID Token không hợp lệ hoặc đã hết hạn"
-                )
-            google_info = response.json()
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
+    google_token = payload.token.strip()
+    if not google_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Lỗi khi xác thực mã đăng nhập Google: {str(e)}"
+            detail="Mã xác thực Google ID Token không được để trống."
+        )
+    
+    # 1. Verify Google token using official google-auth library
+    try:
+        req = google_requests.Request()
+        target_aud = settings.GOOGLE_CLIENT_ID if settings.GOOGLE_CLIENT_ID and "your_google_client_id" not in settings.GOOGLE_CLIENT_ID else None
+        
+        google_info = id_token.verify_oauth2_token(google_token, req, audience=target_aud)
+        
+        # Verify issuer
+        iss = google_info.get("iss", "")
+        if iss not in ["accounts.google.com", "https://accounts.google.com"]:
+            raise ValueError(f"Invalid Google token issuer: {iss}")
+            
+        # Verify email_verified status
+        email_verified = google_info.get("email_verified")
+        if email_verified is not True and email_verified != "true":
+            raise ValueError("Google email not verified")
+            
+    except Exception as exc:
+        logger.warning(f"[Google Auth Verification Error]: {exc.__class__.__name__}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mã xác thực Google ID Token không hợp lệ hoặc đã bị từ chối."
         )
         
     email = google_info.get("email")
@@ -188,13 +229,14 @@ async def google_login(payload: GoogleTokenPayload, db = Depends(get_db)):
         }
         await db.users.insert_one(new_user)
         user = await db.users.find_one({"email": email})
-        print(f"[Google Auth] Registered new user from Google Sign-In: {email}")
+        logger.info(f"[Google Auth] Registered new user from Google Sign-In: {email}")
     else:
-        print(f"[Google Auth] Logged in existing user from Google Sign-In: {email}")
+        logger.info(f"[Google Auth] Logged in existing user from Google Sign-In: {email}")
         
     # 3. Create app JWT access token
     access_token = create_access_token(data={"sub": user["email"]})
     return {"access_token": access_token, "token_type": "bearer"}
+
 
 
 # ==========================================
@@ -305,9 +347,6 @@ async def delete_todo(todo_id: str, current_user = Depends(get_current_user), db
 # CHAT / AGENT ENDPOINTS
 # ==========================================
 
-class MessagePayload(BaseModel):
-    message: str
-
 @app.get("/api/chat/history", response_model=ChatHistoryResponse)
 async def get_chat_history(current_user = Depends(get_current_user), db = Depends(get_db)):
     if db is None:
@@ -322,7 +361,8 @@ async def get_chat_history(current_user = Depends(get_current_user), db = Depend
     return {"messages": serialize_list(messages)}
 
 @app.post("/api/chat")
-async def send_chat_message(payload: MessagePayload, current_user = Depends(get_current_user), db = Depends(get_db)):
+@limiter.limit(settings.RATE_LIMIT_CHAT)
+async def send_chat_message(request: Request, payload: ChatMessagePayload, current_user = Depends(get_current_user), db = Depends(get_db)):
     if db is None:
         raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
         
@@ -375,11 +415,11 @@ async def send_chat_message(payload: MessagePayload, current_user = Depends(get_
         ai_response = final_state.get("final_response", "Xin lỗi, tôi đã gặp sự cố khi xử lý thông tin.")
         should_refresh = final_state.get("should_refresh", False)
     except Exception as e:
-        print(f"[Chat API] Graph execution error: {e}")
-        ai_response = f"Đã xảy ra lỗi trong quá trình xử lý câu hỏi: {str(e)}"
+        logger.error(f"[Chat API] Graph execution error: {e.__class__.__name__}")
+        ai_response = "Đã xảy ra lỗi trong quá trình xử lý câu hỏi với AI. Vui lòng thử lại sau."
         should_refresh = False
 
-    # 5. Save Agent Response to database
+    # 6. Save Agent Response to database
     await db.chat_messages.insert_one({
         "user_id": user_id,
         "sender": "assistant",
@@ -391,6 +431,7 @@ async def send_chat_message(payload: MessagePayload, current_user = Depends(get_
         "response": ai_response,
         "should_refresh": should_refresh
     }
+
 
 @app.delete("/api/chat/history")
 async def clear_chat_history(current_user = Depends(get_current_user), db = Depends(get_db)):
