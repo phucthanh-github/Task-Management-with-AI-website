@@ -85,15 +85,19 @@ async def test_get_todos_is_strictly_read_only():
 
     mock_cursor = MagicMock()
     mock_cursor.sort.return_value = mock_cursor
+    mock_cursor.limit.return_value = mock_cursor
     mock_cursor.to_list = AsyncMock(return_value=[past_due_todo])
     mock_db.todos.find = MagicMock(return_value=mock_cursor)
     mock_db.todos.update_one = AsyncMock()
 
-    todos = await TodoService.get_user_todos(mock_db, USER_ID)
 
-    assert len(todos) == 1
+    result = await TodoService.get_user_todos(mock_db, USER_ID)
+
+    assert len(result["items"]) == 1
+    assert result["next_cursor"] is None
     # Verify update_one was NEVER called during GET
     assert mock_db.todos.update_one.call_count == 0
+
 
 @pytest.mark.asyncio
 async def test_update_overdue_todos_job_transitions_pending_tasks_not_completed():

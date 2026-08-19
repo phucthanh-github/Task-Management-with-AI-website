@@ -3,18 +3,146 @@ from bson import ObjectId
 from fastapi import HTTPException, status
 
 from ..models import TodoCreate, TodoUpdate, serialize_doc
-from ..utils import utc_now, make_utc
+from ..utils import utc_now, make_utc, encode_cursor, decode_cursor
 
 class TodoService:
     @staticmethod
-    async def get_user_todos(db, user_id: str) -> List[dict]:
+    async def get_user_todos(
+        db,
+        user_id: str,
+        limit: int = 10,
+        cursor: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        sort: str = "created_at",
+        order: str = "desc"
+    ) -> dict:
         """
-        Pure read-only query fetching todos owned by user_id.
-        No database side-effect write operations allowed during GET requests.
+        Pure read-only query fetching paginated todos owned by user_id.
+        Supports limit, cursor, status filter, sort allowlist, order asc/desc.
+        Returns {"items": [...], "next_cursor": str | None}.
         """
-        cursor = db.todos.find({"user_id": user_id}).sort("created_at", -1)
-        todos = await cursor.to_list(length=100)
-        return [serialize_doc(todo) for todo in todos]
+        # Validate limit
+        if limit < 1 or limit > 100:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tham số limit phải nằm trong khoảng từ 1 đến 100."
+            )
+
+        # Validate status filter
+        allowed_statuses = ["pending", "in_progress", "completed", "overdue"]
+        clean_status = None
+        if status_filter:
+            clean_status = status_filter.strip().lower()
+            if clean_status not in allowed_statuses:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Trạng thái không hợp lệ. Chỉ chấp nhận: {', '.join(allowed_statuses)}"
+                )
+
+        # Validate sort allowlist
+        allowed_sorts = ["created_at", "updated_at", "deadline"]
+        clean_sort = sort.strip().lower()
+        if clean_sort not in allowed_sorts:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Trường sắp xếp không hợp lệ. Chỉ chấp nhận: {', '.join(allowed_sorts)}"
+            )
+
+        # Validate order
+        clean_order = order.strip().lower()
+        if clean_order not in ["asc", "desc"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Thứ tự sắp xếp không hợp lệ. Chỉ chấp nhận: asc hoặc desc"
+            )
+
+        sort_dir = -1 if clean_order == "desc" else 1
+
+        # Base query scoped by user_id
+        query = {"user_id": user_id}
+        if clean_status:
+            query["status"] = clean_status
+
+        # Validate and decode cursor if provided
+        if cursor:
+            try:
+                cursor_v, cursor_id_str = decode_cursor(cursor)
+                cursor_obj_id = ObjectId(cursor_id_str)
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cursor không hợp lệ"
+                )
+
+            # Build cursor query clause
+            if clean_sort in ["created_at", "updated_at"]:
+                if sort_dir == -1:  # desc
+                    cursor_clause = {
+                        "$or": [
+                            {clean_sort: {"$lt": cursor_v}},
+                            {clean_sort: cursor_v, "_id": {"$lt": cursor_obj_id}}
+                        ]
+                    }
+                else:  # asc
+                    cursor_clause = {
+                        "$or": [
+                            {clean_sort: {"$gt": cursor_v}},
+                            {clean_sort: cursor_v, "_id": {"$gt": cursor_obj_id}}
+                        ]
+                    }
+            elif clean_sort == "deadline":
+                if sort_dir == -1:  # desc: datetimes > null
+                    if cursor_v is not None:
+                        cursor_clause = {
+                            "$or": [
+                                {"deadline": {"$lt": cursor_v}},
+                                {"deadline": cursor_v, "_id": {"$lt": cursor_obj_id}}
+                            ]
+                        }
+                    else:
+                        cursor_clause = {
+                            "deadline": None,
+                            "_id": {"$lt": cursor_obj_id}
+                        }
+                else:  # asc: null < datetimes
+                    if cursor_v is None:
+                        cursor_clause = {
+                            "$or": [
+                                {"deadline": None, "_id": {"$gt": cursor_obj_id}},
+                                {"deadline": {"$ne": None}}
+                            ]
+                        }
+                    else:
+                        cursor_clause = {
+                            "$or": [
+                                {"deadline": {"$gt": cursor_v}},
+                                {"deadline": cursor_v, "_id": {"$gt": cursor_obj_id}}
+                            ]
+                        }
+
+            query = {"$and": [query, cursor_clause]}
+
+        # Sort criteria: [(sort_field, sort_dir), ("_id", sort_dir)]
+        sort_spec = [(clean_sort, sort_dir), ("_id", sort_dir)]
+
+        # Fetch limit + 1 items to check for next page
+        cursor_obj = db.todos.find(query).sort(sort_spec).limit(limit + 1)
+        raw_todos = await cursor_obj.to_list(length=limit + 1)
+
+        next_cursor = None
+        if len(raw_todos) > limit:
+            page_todos = raw_todos[:limit]
+            last_item = page_todos[-1]
+            last_sort_val = last_item.get(clean_sort)
+            next_cursor = encode_cursor(last_sort_val, str(last_item["_id"]))
+        else:
+            page_todos = raw_todos
+
+        return {
+            "items": [serialize_doc(t) for t in page_todos],
+            "next_cursor": next_cursor
+        }
+
 
     @staticmethod
     async def create_todo(db, user_id: str, todo_in: TodoCreate) -> dict:

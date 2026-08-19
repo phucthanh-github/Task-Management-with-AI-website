@@ -7,8 +7,6 @@ from datetime import datetime
 from bson import ObjectId
 from typing import List, Optional
 
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from pymongo.errors import DuplicateKeyError
 
@@ -16,27 +14,27 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
 from .config import settings
+from .limiter import limiter
 from .database import connect_to_mongo, close_mongo_connection, get_db
 from .utils import utc_now
 from .models import (
-    UserRegister, UserLogin, UserResponse, Token, TodoCreate, TodoUpdate, TodoResponse,
-    ChatMessagePayload, ChatMessageModel, ChatHistoryResponse, serialize_doc, serialize_list
+    UserRegister, UserLogin, UserResponse, Token, serialize_doc, serialize_list
 )
 from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 from .scheduler import start_scheduler, shutdown_scheduler
-from .agent.graph import agent_graph
 from .routers.todos import router as todos_router
+from .routers.chat import router as chat_router
 
 # Logging Configuration with Credential Redaction
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("todolist_api")
 
-limiter = Limiter(key_func=get_remote_address)
-
 app = FastAPI(title="To Do List AI Assistant", version="1.0.0")
 app.state.limiter = limiter
 
 app.include_router(todos_router)
+app.include_router(chat_router)
+
 
 @app.exception_handler(RateLimitExceeded)
 async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -252,100 +250,4 @@ async def google_login(request: Request, payload: GoogleTokenPayload, db = Depen
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-# ==========================================
-# CHAT / AGENT ENDPOINTS
-# ==========================================
 
-@app.get("/api/chat/history", response_model=ChatHistoryResponse)
-async def get_chat_history(current_user = Depends(get_current_user), db = Depends(get_db)):
-    if db is None:
-        raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
-        
-    # Get last 10 chat messages in chronological order
-    cursor = db.chat_messages.find({"user_id": current_user["id"]}).sort("timestamp", -1).limit(10)
-    messages = await cursor.to_list(length=10)
-    # Reverse to make it oldest to newest
-    messages.reverse()
-    
-    return {"messages": serialize_list(messages)}
-
-@app.post("/api/chat")
-@limiter.limit(settings.RATE_LIMIT_CHAT)
-async def send_chat_message(request: Request, payload: ChatMessagePayload, current_user = Depends(get_current_user), db = Depends(get_db)):
-    if db is None:
-        raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
-        
-    user_id = current_user["id"]
-    user_message = payload.message.strip()
-    
-    if not user_message:
-        raise HTTPException(status_code=400, detail="Nội dung chat không được trống")
-        
-    # 1. Save User Message to database
-    await db.chat_messages.insert_one({
-        "user_id": user_id,
-        "sender": "user",
-        "content": user_message,
-        "timestamp": utc_now()
-    })
-    
-    # 2. Retrieve last 10 chat messages for Agent history context
-    cursor = db.chat_messages.find({"user_id": user_id}).sort("timestamp", -1).limit(10)
-    history = await cursor.to_list(length=10)
-    history.reverse()
-    
-    # Standard format for AgentState
-    formatted_history = [
-        {"sender": msg["sender"], "content": msg["content"]} for msg in history
-    ]
-    
-    # 3. Retrieve user's hf_token
-    user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
-    hf_token = user_doc.get("hf_token", "") if user_doc else ""
-    
-    # 4. Retrieve current active todos for Context injection
-    todo_cursor = db.todos.find({"user_id": user_id}).sort("created_at", -1)
-    raw_todos = await todo_cursor.to_list(length=100)
-    todos = serialize_list(raw_todos)
-    
-    # 5. Invoke Agent Graph
-    initial_state = {
-        "messages": formatted_history,
-        "user_id": user_id,
-        "todos": todos,
-        "tool_calls": [],
-        "final_response": "",
-        "should_refresh": False,
-        "hf_token": hf_token
-    }
-    
-    try:
-        final_state = await agent_graph.ainvoke(initial_state)
-        ai_response = final_state.get("final_response", "Xin lỗi, tôi đã gặp sự cố khi xử lý thông tin.")
-        should_refresh = final_state.get("should_refresh", False)
-    except Exception as e:
-        logger.error(f"[Chat API] Graph execution error: {e.__class__.__name__}")
-        ai_response = "Đã xảy ra lỗi trong quá trình xử lý câu hỏi với AI. Vui lòng thử lại sau."
-        should_refresh = False
-
-    # 6. Save Agent Response to database
-    await db.chat_messages.insert_one({
-        "user_id": user_id,
-        "sender": "assistant",
-        "content": ai_response,
-        "timestamp": utc_now()
-    })
-    
-    return {
-        "response": ai_response,
-        "should_refresh": should_refresh
-    }
-
-
-@app.delete("/api/chat/history")
-async def clear_chat_history(current_user = Depends(get_current_user), db = Depends(get_db)):
-    if db is None:
-        raise HTTPException(status_code=503, detail="Cơ sở dữ liệu chưa sẵn sàng")
-        
-    await db.chat_messages.delete_many({"user_id": current_user["id"]})
-    return {"message": "Đã xóa toàn bộ lịch sử trò chuyện"}

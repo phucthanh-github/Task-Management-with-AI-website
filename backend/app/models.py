@@ -101,6 +101,10 @@ class TodoResponse(BaseModel):
     updated_at: datetime
     reminded: bool
 
+class PaginatedTodoResponse(BaseModel):
+    items: List[TodoResponse]
+    next_cursor: Optional[str] = None
+
 # Chat Schemas
 class ChatMessagePayload(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000, description="Nội dung tin nhắn chat")
@@ -120,4 +124,9 @@ class ChatMessageModel(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     messages: List[ChatMessageModel]
+
+class PaginatedChatHistoryResponse(BaseModel):
+    items: List[ChatMessageModel]
+    next_cursor: Optional[str] = None
+
 

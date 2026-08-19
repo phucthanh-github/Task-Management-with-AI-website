@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from jose import jwt
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
@@ -9,6 +9,7 @@ from app.config import Settings, settings
 from app.auth import create_access_token
 from app.models import UserRegister, TodoCreate, ChatMessagePayload, UserLogin
 from app.database import get_db
+from app.utils import utc_now
 from app.main import app
 
 @pytest.fixture
@@ -48,11 +49,11 @@ def test_production_fails_fast_on_invalid_secret_key():
 
 def test_jwt_ttl_from_config():
     """JWT expiration time must accurately reflect ACCESS_TOKEN_EXPIRE_MINUTES setting."""
-    start_time = datetime.utcnow()
+    start_time = utc_now()
     token = create_access_token({"sub": "test@gmail.com"})
     
     payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-    exp = datetime.utcfromtimestamp(payload["exp"])
+    exp = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
     expected_exp = start_time + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     
     assert abs((exp - expected_exp).total_seconds()) < 10

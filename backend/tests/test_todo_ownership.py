@@ -9,6 +9,8 @@ from app.database import get_db
 from app.main import app
 from app.services.todo_service import TodoService
 
+from app.utils import utc_now
+
 USER_A_ID = "507f1f77bcf86cd799439011"
 USER_A_EMAIL = "user_a@gmail.com"
 
@@ -29,8 +31,8 @@ def mock_db_with_ownership():
         "description": "Private todo of User B",
         "status": "pending",
         "deadline": None,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
         "reminded": False
     }
 
@@ -108,8 +110,8 @@ async def test_update_todo_service_verifies_user_id_in_read_and_update_queries()
         "title": "Title",
         "description": "",
         "status": "pending",
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
         "reminded": False
     })
     mock_db.todos.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
