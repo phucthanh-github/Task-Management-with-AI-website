@@ -181,7 +181,80 @@ A modern, full-stack task management application powered by intelligent AI assis
 
 ---
 
+## API Endpoints & Pagination Contract
+
+### 1. Todo Pagination API (`GET /api/todos`)
+
+`GET /api/todos` supports cursor-based pagination, status filtering, and sorting. All queries are strictly scoped by the authenticated user ID.
+
+#### Query Parameters:
+- `limit` (integer, default: 10, range: 1–100): Number of items per page.
+- `cursor` (string, optional): Opaque base64 cursor string returned from previous page.
+- `status` (string, optional): Filter by status (`pending`, `in_progress`, `completed`, `overdue`).
+- `sort` (string, default: `created_at`): Sort field allowlist (`created_at`, `updated_at`, `deadline`).
+- `order` (string, default: `desc`): Sort order (`asc` or `desc`).
+
+#### Success Response (HTTP 200 OK):
+```json
+{
+  "items": [
+    {
+      "id": "64a1b2c3d4e5f67890123456",
+      "user_id": "507f1f77bcf86cd799439011",
+      "title": "Hoàn thành báo cáo Phase 2.4",
+      "description": "Thêm pagination cho Todo và Chat API",
+      "status": "pending",
+      "deadline": "2026-08-20T13:00:00+00:00",
+      "created_at": "2026-08-19T14:00:00+00:00",
+      "updated_at": "2026-08-19T14:00:00+00:00",
+      "reminded": false
+    }
+  ],
+  "next_cursor": "eyJ2IjogIjIwMjYtMDgtMTlUMTQ6MDA6MDArMDA6MDAiLCAiaWQiOiAiNjRhMWIyYzNkNGU1ZjY3ODkwMTIzNDU2In0="
+}
+```
+
+### 2. Chat History Pagination API (`GET /api/chat/history`)
+
+`GET /api/chat/history` fetches chat messages page by page. Items within each returned page are ordered in **old-to-new** chronological order for seamless chat UI integration.
+
+#### Query Parameters:
+- `limit` (integer, default: 10, range: 1–100): Number of messages per page.
+- `cursor` (string, optional): Opaque base64 cursor string to fetch older messages.
+
+#### Success Response (HTTP 200 OK):
+```json
+{
+  "items": [
+    {
+      "sender": "user",
+      "content": "Liệt kê các công việc chưa hoàn thành",
+      "timestamp": "2026-08-19T14:05:00+00:00"
+    },
+    {
+      "sender": "assistant",
+      "content": "Bạn đang có 2 công việc pending...",
+      "timestamp": "2026-08-19T14:05:02+00:00"
+    }
+  ],
+  "next_cursor": "eyJ2IjogIjIwMjYtMDgtMTlUMTQ6MDU6MDArMDA6MDAiLCAiaWQiOiAiNjRhMmIzYzRkNWU2ZjY3ODkwMTIzNDU3In0="
+}
+```
+
+### 3. Invalid Query Validation Error (HTTP 400 Bad Request)
+
+Passing invalid query parameters (e.g. invalid cursor, out-of-range limit, or illegal status/sort/order values) returns a standardized HTTP 400 API error:
+
+```json
+{
+  "detail": "Cursor không hợp lệ"
+}
+```
+
+---
+
 ## Security Configuration
+
 
 ### Environment Variables
 
@@ -212,3 +285,56 @@ The *"Development demo login"* button is strictly hidden in production environme
 1. In `frontend/.env`, set `VITE_DEV_DEMO_ENABLED=true`.
 2. In `backend/.env`, set `DEV_DEMO_ENABLED=true`.
 3. Optionally set `VITE_DEV_DEMO_EMAIL` and `VITE_DEV_DEMO_PASSWORD` in your local `.env`.
+
+---
+
+## MongoDB Indexes & Data Integrity
+
+The backend automatically initializes four MongoDB indexes idempotently upon server startup (`connect_to_mongo()`):
+
+1. **`users`**: `{ email: 1 }` (unique: `true`) — Guarantees unique user email addresses at the database level and protects against registration race conditions (`DuplicateKeyError` returning HTTP 400).
+2. **`todos`**: `{ user_id: 1, created_at: -1 }` — Optimizes user task listing sorted by creation date.
+3. **`todos`**: `{ user_id: 1, status: 1, deadline: 1 }` — Optimizes status filtering and deadline range queries.
+4. **`chat_messages`**: `{ user_id: 1, timestamp: -1 }` — Optimizes user chat history retrieval.
+
+If unique index creation fails due to pre-existing duplicate entries in legacy databases, the system logs a detailed warning without deleting user data.
+
+---
+
+## Timezone Standardization
+
+- **Backend Convention**: All timestamps (`created_at`, `updated_at`, `deadline`, `timestamp`) are created and stored as timezone-aware UTC datetime objects (`utc_now()`, `timezone.utc`). Deprecated `datetime.utcnow()` without timezone information is eliminated.
+- **Overdue Processing**: A background job (`update_overdue_todos_job`) periodically compares UTC deadlines against `utc_now()` to transition past-deadline `pending` or `in_progress` tasks to `overdue`. Completed tasks are never modified.
+- **Frontend Display**: The React frontend receives ISO 8601 UTC strings from the API and formats them for the user's browser local timezone (`toLocaleString('vi-VN')`).
+
+---
+
+## Migration & API Compatibility Notes
+
+> [!NOTE]
+> **Response Envelope Schema Change:**
+> - `GET /api/todos` returns `{ "items": [...], "next_cursor": "..." | null }`.
+> - `GET /api/chat/history` returns `{ "items": [...], "next_cursor": "..." | null }`.
+> 
+> The React frontend (`frontend/src/App.jsx`) fully supports cursor-based pagination with deduplication, loading older chat history, status filtering, and sorting.
+
+---
+
+## Running Automated Tests & Quality Checks
+
+### Backend Test Suite (Pytest)
+
+Activate virtual environment and run all tests:
+```powershell
+cd backend
+.\venv\Scripts\activate
+pytest -v
+```
+
+### Frontend Code Verification (ESLint & Vite Build)
+
+```bash
+cd frontend
+npm run lint
+npm run build
+```

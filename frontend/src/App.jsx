@@ -27,13 +27,20 @@ function App() {
   
   // App States
   const [todos, setTodos] = useState([]);
+  const [todoNextCursor, setTodoNextCursor] = useState(null);
   const [filter, setFilter] = useState('all');
+  const [sortField, setSortField] = useState('created_at');
+  const [sortOrder, setSortOrder] = useState('desc');
+
   const [chatMessages, setChatMessages] = useState([]);
+  const [chatNextCursor, setChatNextCursor] = useState(null);
   const [chatInput, setChatInput] = useState('');
   
   // UI & Loading States
   const [loading, setLoading] = useState(false);
+  const [loadingMoreTodos, setLoadingMoreTodos] = useState(false);
   const [chatLoading, setChatLoading] = useState(false);
+  const [loadingMoreChat, setLoadingMoreChat] = useState(false);
   const [error, setError] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -56,8 +63,9 @@ function App() {
   const [todoDeadline, setTodoDeadline] = useState('');
   const [currentEditTodo, setCurrentEditTodo] = useState(null);
   
-  // Chat scroll anchor
+  // Chat scroll anchors & refs
   const chatEndRef = useRef(null);
+  const skipAutoScrollRef = useRef(false);
 
   const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || 'your_google_client_id_here';
 
@@ -66,7 +74,9 @@ function App() {
     localStorage.removeItem('token');
     setUser(null);
     setTodos([]);
+    setTodoNextCursor(null);
     setChatMessages([]);
+    setChatNextCursor(null);
   };
 
   // API Call: Fetch User Info
@@ -86,78 +96,127 @@ function App() {
     }
   };
 
-  // API Call: Fetch Todos
-  const fetchTodos = async () => {
+  // API Call: Fetch Todos (with pagination, status filter, and sort allowlist)
+  const fetchTodos = async (reset = true) => {
+    if (!token) return;
     try {
-      setLoading(true);
-      const res = await fetch(`${API_URL}/api/todos`, {
+      if (reset) {
+        setLoading(true);
+      } else {
+        setLoadingMoreTodos(true);
+      }
+
+      let url = `${API_URL}/api/todos?limit=10&sort=${sortField}&order=${sortOrder}`;
+      if (filter !== 'all') {
+        url += `&status=${filter}`;
+      }
+      if (!reset && todoNextCursor) {
+        url += `&cursor=${encodeURIComponent(todoNextCursor)}`;
+      }
+
+      const res = await fetch(url, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
+
       if (res.ok) {
         const data = await res.json();
-        setTodos(data);
+        const newItems = data.items || (Array.isArray(data) ? data : []);
+        const newCursor = data.next_cursor || null;
+
+        if (reset) {
+          setTodos(newItems);
+        } else {
+          setTodos(prev => {
+            const existingIds = new Set(prev.map(t => t.id));
+            const uniqueNew = newItems.filter(t => !existingIds.has(t.id));
+            return [...prev, ...uniqueNew];
+          });
+        }
+        setTodoNextCursor(newCursor);
+      } else {
+        const data = await res.json();
+        setError(data.detail || 'Lỗi khi tải danh sách công việc');
       }
     } catch (err) {
       console.error("Error fetching todos:", err);
+      setError('Lỗi kết nối khi tải danh sách công việc');
     } finally {
       setLoading(false);
+      setLoadingMoreTodos(false);
     }
   };
 
-  // API Call: Fetch Chat History
-  const fetchChatHistory = async () => {
+  // API Call: Fetch Chat History (with pagination & prepending older history)
+  const fetchChatHistory = async (reset = true) => {
+    if (!token) return;
     try {
-      const res = await fetch(`${API_URL}/api/chat/history`, {
+      if (!reset) {
+        setLoadingMoreChat(true);
+      }
+
+      let url = `${API_URL}/api/chat/history?limit=10`;
+      if (!reset && chatNextCursor) {
+        url += `&cursor=${encodeURIComponent(chatNextCursor)}`;
+      }
+
+      const res = await fetch(url, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
+
       if (res.ok) {
         const data = await res.json();
-        setChatMessages(data.messages || []);
+        const newItems = data.items || data.messages || [];
+        const newCursor = data.next_cursor || null;
+
+        if (reset) {
+          setChatMessages(newItems);
+        } else {
+          setChatMessages(prev => {
+            const existingKeys = new Set(prev.map(m => `${m.sender}-${m.timestamp}-${m.content}`));
+            const uniqueOlder = newItems.filter(m => !existingKeys.has(`${m.sender}-${m.timestamp}-${m.content}`));
+            return [...uniqueOlder, ...prev];
+          });
+        }
+        setChatNextCursor(newCursor);
       }
     } catch (err) {
       console.error("Error fetching chat history:", err);
+    } finally {
+      setLoadingMoreChat(false);
     }
   };
 
-  // Auto-scroll chat history
+  // Auto-scroll chat history unless user is prepending older messages
   useEffect(() => {
+    if (skipAutoScrollRef.current) {
+      skipAutoScrollRef.current = false;
+      return;
+    }
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, chatLoading]);
 
-  // Load User Details, Todos and Chat History upon authentication
+  // Load User Details and Chat History upon authentication
   useEffect(() => {
     if (!token) {
       localStorage.removeItem('token');
       return;
     }
     localStorage.setItem('token', token);
-    let isMounted = true;
-    const loadData = async () => {
-      try {
-        const [userRes, todosRes, chatRes] = await Promise.all([
-          fetch(`${API_URL}/api/auth/me`, { headers: { 'Authorization': `Bearer ${token}` } }),
-          fetch(`${API_URL}/api/todos`, { headers: { 'Authorization': `Bearer ${token}` } }),
-          fetch(`${API_URL}/api/chat/history`, { headers: { 'Authorization': `Bearer ${token}` } })
-        ]);
-        if (isMounted && userRes.ok) {
-          const u = await userRes.json();
-          setUser(u);
-        }
-        if (isMounted && todosRes.ok) {
-          const t = await todosRes.json();
-          setTodos(t);
-        }
-        if (isMounted && chatRes.ok) {
-          const c = await chatRes.json();
-          setChatMessages(c.messages || []);
-        }
-      } catch (err) {
-        console.error("Error fetching initial data:", err);
-      }
-    };
-    loadData();
-    return () => { isMounted = false; };
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchUserData();
+    fetchChatHistory(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
+
+  // Fetch / Refetch Todos when token, filter, sortField, or sortOrder changes
+  useEffect(() => {
+    if (!token) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchTodos(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, filter, sortField, sortOrder]);
+
+
 
 
   // Initialize and render Google Login button
@@ -603,14 +662,8 @@ function App() {
     });
   };
 
-  // Filter Logic
-  const filteredTodos = todos.filter(todo => {
-    if (filter === 'all') return true;
-    return todo.status === filter;
-  });
-
-  // COUNT BADGES
-  const countTodos = (status) => todos.filter(t => t.status === status).length;
+  // Helper: Count todos by status in current view
+  const countTodos = (st) => todos.filter(t => t.status === st).length;
 
   // --- RENDER GIAO DIỆN AUTH ---
   if (!token) {
@@ -791,37 +844,59 @@ function App() {
             })()}
 
             <div className="todo-header-actions">
-              <div className="filters-container">
-                <button 
-                  className={`filter-chip ${filter === 'all' ? 'active' : ''}`}
-                  onClick={() => setFilter('all')}
-                >
-                  Tất cả ({todos.length})
-                </button>
-                <button 
-                  className={`filter-chip ${filter === 'pending' ? 'active' : ''}`}
-                  onClick={() => setFilter('pending')}
-                >
-                  Chưa làm ({countTodos('pending')})
-                </button>
-                <button 
-                  className={`filter-chip ${filter === 'in_progress' ? 'active' : ''}`}
-                  onClick={() => setFilter('in_progress')}
-                >
-                  Đang làm ({countTodos('in_progress')})
-                </button>
-                <button 
-                  className={`filter-chip ${filter === 'completed' ? 'active' : ''}`}
-                  onClick={() => setFilter('completed')}
-                >
-                  Đã xong ({countTodos('completed')})
-                </button>
-                <button 
-                  className={`filter-chip ${filter === 'overdue' ? 'active' : ''}`}
-                  onClick={() => setFilter('overdue')}
-                >
-                  Trễ hạn ({countTodos('overdue')})
-                </button>
+              <div className="filters-container" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px', width: '100%' }}>
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  <button 
+                    className={`filter-chip ${filter === 'all' ? 'active' : ''}`}
+                    onClick={() => setFilter('all')}
+                  >
+                    Tất cả
+                  </button>
+                  <button 
+                    className={`filter-chip ${filter === 'pending' ? 'active' : ''}`}
+                    onClick={() => setFilter('pending')}
+                  >
+                    Chưa làm
+                  </button>
+                  <button 
+                    className={`filter-chip ${filter === 'in_progress' ? 'active' : ''}`}
+                    onClick={() => setFilter('in_progress')}
+                  >
+                    Đang làm
+                  </button>
+                  <button 
+                    className={`filter-chip ${filter === 'completed' ? 'active' : ''}`}
+                    onClick={() => setFilter('completed')}
+                  >
+                    Đã xong
+                  </button>
+                  <button 
+                    className={`filter-chip ${filter === 'overdue' ? 'active' : ''}`}
+                    onClick={() => setFilter('overdue')}
+                  >
+                    Trễ hạn
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto' }}>
+                  <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Sắp xếp:</label>
+                  <select 
+                    className="input-field" 
+                    value={`${sortField}-${sortOrder}`}
+                    onChange={(e) => {
+                      const [sf, so] = e.target.value.split('-');
+                      setSortField(sf);
+                      setSortOrder(so);
+                    }}
+                    style={{ padding: '6px 12px', fontSize: '0.8rem', width: 'auto', marginBottom: 0 }}
+                  >
+                    <option value="created_at-desc">Ngày tạo: Mới nhất</option>
+                    <option value="created_at-asc">Ngày tạo: Cũ nhất</option>
+                    <option value="deadline-asc">Hạn chót: Tới hạn trước</option>
+                    <option value="deadline-desc">Hạn chót: Tới hạn sau</option>
+                    <option value="updated_at-desc">Cập nhật: Mới nhất</option>
+                  </select>
+                </div>
               </div>
 
               <button className="add-task-btn" onClick={() => {
@@ -829,7 +904,7 @@ function App() {
                 setTodoDesc('');
                 setTodoDeadline('');
                 setShowAddModal(true);
-              }}>
+              }} style={{ marginTop: '10px' }}>
                 <Plus size={18} />
                 Thêm việc
               </button>
@@ -841,80 +916,103 @@ function App() {
                 <RefreshCw size={24} className="animate-spin" style={{margin:'0 auto 10px'}}/>
                 Đang tải dữ liệu...
               </div>
-            ) : filteredTodos.length === 0 ? (
+            ) : todos.length === 0 ? (
               <div className="empty-state">
                 <CheckCircle size={48} />
                 <h3>Không có công việc nào</h3>
                 <p>Nhấp vào nút "Thêm việc" hoặc chat với trợ lý AI ở góc phải để tạo công việc mới.</p>
               </div>
             ) : (
-              <div className="todo-list-container">
-                {filteredTodos.map((todo, index) => (
-                  <div 
-                    key={todo.id} 
-                    className={`todo-card status-${todo.status}`}
-                    style={{ animationDelay: `${index * 40}ms` }}
-                  >
-                    
-                    <div className="todo-card-header">
-                      <div style={{flex: 1}}>
-                        <div style={{display:'flex', alignItems:'center', gap: 10, marginBottom: 6}}>
-                          <span className={`badge badge-${todo.status}`}>
-                            {todo.status === 'completed' ? 'Hoàn thành' : 
-                             todo.status === 'in_progress' ? 'Đang làm' :
-                             todo.status === 'overdue' ? 'Trễ hạn' : 'Chưa làm'}
-                          </span>
-                          <span className="todo-title">{todo.title}</span>
-                        </div>
-                        {todo.description && <p className="todo-desc">{todo.description}</p>}
-                      </div>
-
-                      {/* Complete toggle */}
-                      <button 
-                        className="action-icon-btn btn-complete" 
-                        onClick={() => toggleTodoStatus(todo)}
-                        title={todo.status === 'completed' ? 'Đánh dấu chưa làm' : 'Đánh dấu hoàn thành'}
-                      >
-                        {todo.status === 'completed' ? (
-                          <CheckCircle size={18} style={{color: 'var(--color-completed)'}} />
-                        ) : (
-                          <Circle size={18} />
-                        )}
-                      </button>
-                    </div>
-
-                    <div className="todo-card-footer">
-                      <div className="todo-meta">
-                        {todo.deadline && (
-                          <span className="todo-deadline">
-                            <Clock size={12} />
-                            Hạn: {formatDeadline(todo.deadline)}
-                          </span>
-                        )}
-                      </div>
+              <div>
+                <div className="todo-list-container">
+                  {todos.map((todo, index) => (
+                    <div 
+                      key={todo.id} 
+                      className={`todo-card status-${todo.status}`}
+                      style={{ animationDelay: `${index * 40}ms` }}
+                    >
                       
-                      <div className="todo-actions">
+                      <div className="todo-card-header">
+                        <div style={{flex: 1}}>
+                          <div style={{display:'flex', alignItems:'center', gap: 10, marginBottom: 6}}>
+                            <span className={`badge badge-${todo.status}`}>
+                              {todo.status === 'completed' ? 'Hoàn thành' : 
+                               todo.status === 'in_progress' ? 'Đang làm' :
+                               todo.status === 'overdue' ? 'Trễ hạn' : 'Chưa làm'}
+                            </span>
+                            <span className="todo-title">{todo.title}</span>
+                          </div>
+                          {todo.description && <p className="todo-desc">{todo.description}</p>}
+                        </div>
+
+                        {/* Complete toggle */}
                         <button 
-                          className="action-icon-btn" 
-                          onClick={() => openEditModal(todo)}
-                          title="Sửa công việc"
+                          className="action-icon-btn btn-complete" 
+                          onClick={() => toggleTodoStatus(todo)}
+                          title={todo.status === 'completed' ? 'Đánh dấu chưa làm' : 'Đánh dấu hoàn thành'}
                         >
-                          <Edit3 size={14} />
-                        </button>
-                        <button 
-                          className="action-icon-btn btn-delete" 
-                          onClick={() => handleDeleteTodo(todo.id)}
-                          title="Xóa công việc"
-                        >
-                          <Trash2 size={14} />
+                          {todo.status === 'completed' ? (
+                            <CheckCircle size={18} style={{color: 'var(--color-completed)'}} />
+                          ) : (
+                            <Circle size={18} />
+                          )}
                         </button>
                       </div>
-                    </div>
 
+                      <div className="todo-card-footer">
+                        <div className="todo-meta">
+                          {todo.deadline && (
+                            <span className="todo-deadline">
+                              <Clock size={12} />
+                              Hạn: {formatDeadline(todo.deadline)}
+                            </span>
+                          )}
+                        </div>
+                        
+                        <div className="todo-actions">
+                          <button 
+                            className="action-icon-btn" 
+                            onClick={() => openEditModal(todo)}
+                            title="Sửa công việc"
+                          >
+                            <Edit3 size={14} />
+                          </button>
+                          <button 
+                            className="action-icon-btn btn-delete" 
+                            onClick={() => handleDeleteTodo(todo.id)}
+                            title="Xóa công việc"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+
+                    </div>
+                  ))}
+                </div>
+
+                {todoNextCursor && (
+                  <div style={{ textAlign: 'center', marginTop: '20px' }}>
+                    <button 
+                      className="btn-secondary" 
+                      onClick={() => fetchTodos(false)}
+                      disabled={loadingMoreTodos || loading}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '10px 24px', cursor: 'pointer' }}
+                    >
+                      {loadingMoreTodos ? (
+                        <>
+                          <RefreshCw size={16} className="animate-spin" />
+                          Đang tải thêm...
+                        </>
+                      ) : (
+                        'Tải thêm công việc'
+                      )}
+                    </button>
                   </div>
-                ))}
+                )}
               </div>
             )}
+
           </div>
 
           {/* RIGHT: AI Chatbot Panel */}
@@ -1011,7 +1109,25 @@ function App() {
                 <>
                   {/* Chat timeline */}
                   <div className="chatbot-history">
+                    {chatNextCursor && (
+                      <div style={{ textAlign: 'center', padding: '4px 0 12px' }}>
+                        <button 
+                          type="button"
+                          className="chatbot-clear-btn" 
+                          onClick={() => {
+                            skipAutoScrollRef.current = true;
+                            fetchChatHistory(false);
+                          }}
+                          disabled={loadingMoreChat}
+                          style={{ fontSize: '0.78rem', padding: '6px 14px' }}
+                        >
+                          {loadingMoreChat ? 'Đang tải tin nhắn cũ...' : '📜 Tải tin nhắn cũ hơn'}
+                        </button>
+                      </div>
+                    )}
+
                     {chatMessages.length === 0 ? (
+
                       <div style={{
                         display:'flex', 
                         flexDirection:'column', 

@@ -56,76 +56,104 @@
 
 ---
 
-## 4. Danh sách File thay đổi / Tạo mới
+## 5. Tiến độ Phase 2.5 — Frontend Pagination Integration cho Todo & Chat API
+
+### Mục tiêu đã hoàn thành
+- **Xử lý Response Envelope Schema `{ items, next_cursor }`:**
+  - Cập nhật hàm `fetchTodos` và `fetchChatHistory` trong `frontend/src/App.jsx` để lưu trữ dữ liệu danh sách `items` và lưu `next_cursor` vào state riêng biệt (`todoNextCursor`, `chatNextCursor`).
+- **Thêm nút "Tải thêm công việc" (Todo Pagination):**
+  - Hiển thị nút *"Tải thêm công việc"* ở cuối danh sách công việc khi `todoNextCursor != null`.
+  - Vô hiệu hoá button khi đang thực hiện request (`loadingMoreTodos` hoặc `loading`).
+  - Sử dụng Set ID để lọc loại bỏ phần tử trùng lặp (**deduplication**), không tạo dư thừa công việc khi nối dữ liệu trang mới.
+  - Bảo toàn danh sách công việc hiện tại nếu request lấy trang mới gặp sự cố mạng hoặc lỗi API.
+- **Tự động Reset Pagination Cursor khi có thay đổi:**
+  - Tự động xóa `todoNextCursor` về `null` và fetch lại trang đầu tiên (`reset = true`) khi:
+    1. Người dùng bấm tạo công việc mới (`handleCreateTodo`).
+    2. Chỉnh sửa chi tiết công việc (`handleUpdateTodo`) hoặc đánh dấu chuyển trạng thái (`toggleTodoStatus`).
+    3. Xóa công việc (`handleDeleteTodo`).
+    4. Thay đổi bộ lọc trạng thái (`filter`) hoặc chọn tiêu chí/thứ tự sắp xếp (`sortField`, `sortOrder`).
+    5. Trợ lý AI thực hiện cập nhật cơ sở dữ liệu (`should_refresh === true`).
+- **Kết nối Filter Status & Sort Allowlist trực tiếp với Backend:**
+  - Truyền query parameter `status` (`pending`, `in_progress`, `completed`, `overdue`) trực tiếp tới API `GET /api/todos`, loại bỏ việc giả lập lọc mảng client-side không chính xác.
+  - Thêm bộ chọn Sắp xếp (Sort dropdown) cho phép sắp xếp theo `created_at` (ngày tạo), `updated_at` (cập nhật) và `deadline` (hạn chót) theo thứ tự `asc`/`desc`.
+- **Tải lịch sử Chat cũ hơn (Chat History Pagination):**
+  - Ban đầu chỉ tải 1 trang tin nhắn mới nhất (10 tin nhắn).
+  - Hiển thị nút *"📜 Tải tin nhắn cũ hơn"* phía trên cùng của giao diện chat khi `chatNextCursor != null`.
+  - Khi người dùng click, request trang lịch sử cũ hơn và **prepend** vào đầu mảng `chatMessages` mà vẫn bảo đảm thứ tự hội thoại từ cũ đến mới (**old-to-new**) không bị đảo loạn hay trùng lặp.
+  - Tắt hiệu ứng cuộn tự động xuống đáy khi đang tải lịch sử cũ hơn để tránh trải nghiệm giật lắc.
+- **Đảm bảo Timezone Browser cho Deadline:**
+  - Hàm `formatDeadline()` chuyển đổi ISO UTC string trả về từ API thành định dạng ngày giờ địa phương hiển thị đúng theo múi giờ trình duyệt người dùng qua `toLocaleString('vi-VN')`.
+- **Code Quality & Build Verification:**
+  - Chạy `npm run lint`: **PASSED (0 errors, 0 warnings)**.
+  - Chạy `npm run build`: **PASSED (Vite build thành công trong 4.23s)**.
+  - Chạy `pytest -v`: **PASSED (23/23 tests 100% SUCCESS)**.
+
+---
+
+## 6. Danh sách File thay đổi / Tạo mới
 
 | File | Loại thay đổi | Mô tả |
 | :--- | :--- | :--- |
-| `backend/app/utils.py` | New | Cung cấp helper functions `utc_now()` và `make_utc()` chuẩn hóa datetime dạng timezone-aware UTC. |
-| `backend/app/database.py` | Modify | Định nghĩa hàm `init_indexes()` tự động tạo 4 indexes MongoDB. |
-| `backend/app/services/todo_service.py` | Modify | Đóng gói CRUD Todo với `user_id` + `_id`, gỡ ghi DB khỏi `get_user_todos()`, cập nhật semantics deadline và thêm `update_overdue_todos()`. |
-| `backend/app/scheduler.py` | Modify | Chuyển sang `utc_now()` và đăng ký job định kỳ `update_overdue_todos_job`. |
-| `backend/app/agent/tools.py` | Modify | Chuẩn hóa `parse_deadline_str` và `execute_action_tool` sử dụng `utc_now()` và `make_utc()`. |
-| `backend/app/agent/graph.py` | Modify | Cập nhật fallback và prompt formatting sử dụng `utc_now()`. |
-| `backend/app/models.py` & `auth.py` | Modify | Cập nhật `ChatMessageModel` và JWT expiration sử dụng `utc_now()`. |
-| `backend/app/main.py` | Modify | Bắt `DuplicateKeyError`, chuyển sang `utc_now()` và đăng ký `todos_router`. |
-| `backend/app/routers/todos.py` | New | Router cho các endpoints `/api/todos`. |
-| `backend/tests/test_database_indexes.py` | New | Unit tests kiểm tra khởi tạo index idempotent và ném HTTP 400 khi trùng email. |
-| `backend/tests/test_todo_ownership.py` | New | Unit tests chứng minh User A không thể truy cập/sửa/xoá Todo của User B. |
-| `backend/tests/test_timezone_and_overdue.py` | New | Unit tests chứng minh timezone `+07:00` chuẩn hóa UTC, `deadline: null`, GET read-only và overdue job. |
-| `docs/phase-2-progress.md` | Update | Cập nhật tiến độ Phase 2.1, 2.2, 2.3, file thay đổi, test results và migration notes. |
+| `backend/app/utils.py` | Modify | Thêm hàm helper `encode_cursor()` và `decode_cursor()` xử lý base64 URL-safe cursor. |
+| `backend/app/models.py` | Modify | Định nghĩa `PaginatedTodoResponse` và `PaginatedChatHistoryResponse`. |
+| `backend/app/limiter.py` | New | Cung cấp shared `Limiter` instance tránh circular imports giữa main và routers. |
+| `backend/app/services/todo_service.py` | Modify | Xây dựng logic cursor pagination, status filter, sort allowlist và limit validation trong `get_user_todos()`. |
+| `backend/app/routers/todos.py` | Modify | Thêm Query parameters và đổi response model `GET /api/todos` sang `PaginatedTodoResponse`. |
+| `backend/app/routers/chat.py` | New | Router cho các endpoints Chat (`/api/chat/history`, `/api/chat`), tích hợp pagination old-to-new. |
+| `backend/app/main.py` | Modify | Tích hợp `chat_router` và gỡ các endpoint chat dư thừa khỏi file monolith. |
+| `frontend/src/App.jsx` | Modify | Tích hợp UI pagination "Tải thêm công việc", "Tải tin nhắn cũ hơn", dropdown Sắp xếp, backend status filtering, deduplication, và reset cursor. |
+| `README.md` | Modify | Cập nhật tài liệu API, tham số pagination, validation error và response examples. |
+| `backend/tests/test_pagination_filter_sort.py` | New | Bộ unit tests kiểm thử toàn bộ tính năng Phase 2.4/2.5. |
+| `backend/tests/test_timezone_and_overdue.py` | Modify | Cập nhật assertion kiểm tra `result["items"]` phù hợp với schema paginated response mới. |
+| `docs/phase-2-progress.md` | Update | Cập nhật tiến độ Phase 2.1 - 2.5, danh sách file, migration notes và test results. |
 
 ---
 
-## 5. Migration & Compatibility Notes
+## 7. Migration & Compatibility Notes
 
 > [!NOTE]
-> **Legacy Naive Datetime Strategy:**
-> Dữ liệu naive UTC sẵn có trong MongoDB được PyMongo tự động chuyển thành BSON Date (UTC milliseconds epoch). Các truy vấn thời gian sử dụng `make_utc()` và `utc_now()` tương thích hoàn toàn với dữ liệu cũ mà không cần chạy destructive database migration.
+> **API Envelope Breaking Change & Frontend Integration:**
+> - `GET /api/todos`: Trả về envelope object `{ "items": [...], "next_cursor": "..." }`.
+> - `GET /api/chat/history`: Trả về envelope object `{ "items": [...], "next_cursor": "..." }`.
 > 
-> **Deadline Update Semantics:**
-> - Trường deadline không truyền: Giữ nguyên giá trị cũ.
-> - Trường deadline = `null`: Xóa deadline (`deadline = None`) và reset `reminded = False`.
-> - Trường deadline = string ISO (ví dụ: `2026-08-20T20:00:00+07:00`): Tự động chuyển đổi về UTC (`2026-08-20T13:00:00+00:00`) và reset `reminded = False`.
+> **Frontend Pagination & Infinite Scopes:**
+> Phía Frontend `App.jsx` đã hoàn toàn được kết nối với backend cursor pagination. Mọi thao tác lọc status hoặc đổi tiêu chí sắp xếp đều gọi API trực tiếp với các query parameters tương ứng. Khi tải trang mới, dữ liệu cũ được bảo toàn và chống trùng lặp bằng ID set.
 
 ---
 
-## 6. Kết quả Kiểm thử (Test Results)
+## 8. Kết quả Kiểm thử (Test Results)
 
-Lệnh kiểm thử toàn bộ backend suite:
+Lệnh kiểm thử Frontend:
+```bash
+cd frontend
+npm run lint
+npm run build
+```
+**Kết quả Frontend:**
+- ESLint: **0 errors, 0 warnings**
+- Vite Build: **PASSED (dist bundle built in 4.23s)**
+
+Lệnh kiểm thử Backend:
 ```powershell
 cd backend
 .\venv\Scripts\pytest -v
 ```
-
-**Kết quả:** `17 passed in 3.91s` (100% SUCCESS)
-- `tests/test_database_indexes.py::test_init_indexes_creates_all_indexes_idempotently` — **PASSED**
-- `tests/test_database_indexes.py::test_init_indexes_handles_duplicate_key_error_gracefully` — **PASSED**
-- `tests/test_database_indexes.py::test_register_user_handles_duplicate_key_error` — **PASSED**
-- `tests/test_security.py::test_production_fails_fast_on_invalid_secret_key` — **PASSED**
-- `tests/test_security.py::test_jwt_ttl_from_config` — **PASSED**
-- `tests/test_security.py::test_cors_origin_allowlist` — **PASSED**
-- `tests/test_security.py::test_input_validation_password_length` — **PASSED**
-- `tests/test_security.py::test_input_validation_title_and_message` — **PASSED**
-- `tests/test_security.py::test_google_login_rejects_empty_or_invalid_token` — **PASSED**
-- `tests/test_security.py::test_rate_limit_auth_endpoints` — **PASSED**
-- `tests/test_timezone_and_overdue.py::test_create_todo_normalizes_plus_07_timezone_to_utc` — **PASSED**
-- `tests/test_timezone_and_overdue.py::test_update_todo_deadline_null_clears_deadline_and_resets_reminded` — **PASSED**
-- `tests/test_timezone_and_overdue.py::test_get_todos_is_strictly_read_only` — **PASSED**
-- `tests/test_timezone_and_overdue.py::test_update_overdue_todos_job_transitions_pending_tasks_not_completed` — **PASSED**
-- `tests/test_todo_ownership.py::test_user_a_cannot_update_user_b_todo` — **PASSED**
-- `tests/test_todo_ownership.py::test_user_a_cannot_delete_user_b_todo` — **PASSED**
-- `tests/test_todo_ownership.py::test_update_todo_service_verifies_user_id_in_read_and_update_queries` — **PASSED**
+**Kết quả Backend:** `23 passed in 10.86s` (100% SUCCESS)
 
 ---
 
-## 7. Context cho Agent tiếp theo
+## 9. Context cho Agent tiếp theo
 
 ### Đã hoàn thành trong Phase 2:
-1. **Phase 2.1:** MongoDB Idempotent Indexing (`users.email` unique, `todos` multi-field indexes, `chat_messages` timestamp) và xử lý race condition `DuplicateKeyError`.
-2. **Phase 2.2:** Tách Todo API thành Router (`backend/app/routers/todos.py`) & Service (`backend/app/services/todo_service.py`), ép buộc ownership query bằng cả `_id` + `user_id`.
-3. **Phase 2.3:** Chuẩn hóa timezone-aware UTC (`utc_now()`, `make_utc()`), `GET /api/todos` thuần chỉ đọc, tách overdue transition thành background job độc lập, và cập nhật semantics cho deadline update.
+1. **Phase 2.1:** MongoDB Idempotent Indexing và xử lý race condition `DuplicateKeyError`.
+2. **Phase 2.2:** Tách Todo Router (`todos.py`) & Service (`todo_service.py`), ép buộc ownership query `_id` + `user_id`.
+3. **Phase 2.3:** Chuẩn hóa timezone UTC (`utc_now()`, `make_utc()`), `GET /api/todos` read-only, tách overdue job độc lập.
+4. **Phase 2.4:** Cursor Pagination, Status Filter, Sort Allowlist cho Todo & Chat API, tách Chat Router (`chat.py`), trả về schema chuẩn `{ "items": [...], "next_cursor": "..." }`.
+5. **Phase 2.5:** Tích hợp Frontend Pagination cho Todo ("Tải thêm công việc"), Chat History ("Tải tin nhắn cũ hơn"), backend status filter, sort controls, deduplication, reset cursor và kiểm thử linter/build 100% thành công.
 
 ### Các việc còn lại trong các pha tiếp theo:
-- [ ] **Cookie-based JWT Auth (Phase 2.4):** Chuyển JWT từ `localStorage` sang Cookie `HttpOnly; Secure; SameSite=Strict` kết hợp CSRF Protection Token.
-- [ ] **Refresh Token Mechanism (Phase 2.5):** Triển khai cơ chế Refresh Token Rotation để cấp lại access token ngắn hạn mà không yêu cầu user đăng nhập lại.
-- [ ] **Redis Storage cho Rate Limiter (Phase 2.6):** Chuyển `slowapi` storage từ memory sang Redis hỗ trợ ứng dụng scale multi-instance.
+- [ ] **Cookie-based JWT Auth (Phase 2.6):** Chuyển JWT từ `localStorage` sang Cookie `HttpOnly; Secure; SameSite=Strict` kết hợp CSRF Protection Token.
+- [ ] **Refresh Token Mechanism (Phase 2.7):** Triển khai cơ chế Refresh Token Rotation để cấp lại access token ngắn hạn mà không yêu cầu user đăng nhập lại.
+- [ ] **Redis Storage cho Rate Limiter (Phase 2.8):** Chuyển `slowapi` storage từ memory sang Redis hỗ trợ ứng dụng scale multi-instance.
+
+
